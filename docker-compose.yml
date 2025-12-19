@@ -1,0 +1,15 @@
+services:
+  frontend:
+    build: .
+    container_name: clinical-os-frontend
+    ports:
+      - "3000:80"
+    restart: always
+    environment:
+      - NODE_ENV=production
+    networks:
+      - clinical-network
+
+networks:
+  clinical-network:
+    driver: bridge
