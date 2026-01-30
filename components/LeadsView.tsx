@@ -8,6 +8,7 @@ import {
 import { api } from '../services/api';
 import { Lead } from '../types';
 import { DOCTORS } from '../constants';
+import * as XLSX from 'xlsx';
 
 interface LeadsViewProps {
     leads: Lead[];
@@ -125,65 +126,87 @@ export const LeadsView: React.FC<LeadsViewProps> = ({ leads, onUpdateLead, onOpe
 
         const reader = new FileReader();
         reader.onload = async (e) => {
-            const text = e.target?.result as string;
-            if (!text) return;
+            const data = e.target?.result;
+            if (!data) return;
 
-            const rows = text.split('\n').map(row => row.split(','));
-            // CSV columns match export: Name, Phone, Status, Source, Gender, Age, Problem, Date Added
-            // Skipping header if detected
-            const startIndex = rows[0][0].toLowerCase().includes('name') ? 1 : 0;
+            try {
+                // Parse file using XLSX (supports csv, xls, xlsx)
+                const workbook = XLSX.read(data, { type: 'array' });
+                const firstSheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[firstSheetName];
 
-            let successCount = 0;
-            let errorCount = 0;
+                // Get raw data to check if headers are being read correctly
+                const jsonData = XLSX.utils.sheet_to_json(worksheet);
+                console.log('Import Debug - Raw Data (First 3 rows):', jsonData.slice(0, 3));
 
-            for (let i = startIndex; i < rows.length; i++) {
-                const cols = rows[i].map(c => c.trim().replace(/^"|"$/g, ''));
-                if (cols.length < 2 || !cols[0]) continue; // Skip empty rows
+                let successCount = 0;
+                let errorCount = 0;
+                let skippedCount = 0;
 
-                // Match export column order: Name, Phone, Status, Source, Gender, Age, Problem, Date Added
-                const [name, phone, _status, source, gender, age, problem] = cols;
+                if (jsonData.length === 0) {
+                    alert('The file appears to be empty or could not be parsed. Please check if the first row contains headers like "Name" and "Phone".');
+                    return;
+                }
 
-                // Basic validation
-                if (!name || !phone) continue;
+                for (const row of jsonData as any[]) {
+                    // Maximize compatibility by normalizing keys
+                    const normalized: Record<string, any> = {};
+                    Object.keys(row).forEach(key => {
+                        // Handle potential non-string keys or weird formatting
+                        const stringKey = String(key).toLowerCase().trim();
+                        normalized[stringKey] = row[key];
+                    });
 
-                try {
-                    // Create lead with all CSV fields properly mapped
-                    // Note: We trim values and keep them as strings - the backend will handle empty strings
-                    const genderVal = gender ? gender.trim() : '';
-                    const ageVal = age ? age.trim() : '';
-                    const problemVal = problem ? problem.trim() : '';
+                    // console.log('Processing Row:', normalized); // Uncomment to debug specific row mapping
+
+                    // Map fields checking common variations
+                    const name = normalized['name'] || normalized['full name'] || normalized['fullname'] || normalized['client'] || normalized['customer'] || normalized['patient name'];
+                    const phone = normalized['phone'] || normalized['mobile'] || normalized['contact'] || normalized['cell'] || normalized['number'] || normalized['phonenumber'];
+
+                    if (!name || !phone) {
+                        console.warn('Skipping row - Missing Name or Phone:', row);
+                        skippedCount++;
+                        continue;
+                    }
 
                     const leadData: Record<string, any> = {
                         name,
-                        phone,
-                        source: source ? source.trim() : 'Bulk Import',
-                        // Always set status to 'New Inquiry' for imported leads
-                        status: 'New Inquiry',
-                        inquiry: 'Bulk Import',
-                        date_added: new Date().toISOString()
+                        phone: String(phone),
+                        status: 'New Inquiry', // Default
+                        source: normalized['source'] || 'Bulk Import',
+                        inquiry: normalized['inquiry'] || 'Bulk Import',
+                        date_added: new Date().toISOString(),
+                        gender: normalized['gender'] || normalized['sex'],
+                        age: normalized['age'] ? String(normalized['age']) : undefined,
+                        problem: normalized['problem'] || normalized['complaint'] || normalized['notes'] || normalized['remark']
                     };
 
-                    // Only add these fields if they have actual values
-                    if (genderVal) leadData.gender = genderVal;
-                    if (ageVal) leadData.age = ageVal;
-                    if (problemVal) leadData.problem = problemVal;
-
-                    console.log('Importing lead:', name, leadData);
-                    await api.createLead(leadData);
-                    successCount++;
-                } catch (err) {
-                    console.error('Failed to import lead:', name, err);
-                    errorCount++;
+                    try {
+                        await api.createLead(leadData);
+                        successCount++;
+                    } catch (err) {
+                        console.error('Failed to import lead:', name, err);
+                        errorCount++;
+                    }
                 }
-            }
 
-            alert(`Import Complete!\nSuccess: ${successCount}\nFailed: ${errorCount}`);
-            if (onRefresh && successCount > 0) {
-                onRefresh();
+                let msg = `Import Complete!\nSuccess: ${successCount}\nFailed: ${errorCount}`;
+                if (skippedCount > 0) {
+                    msg += `\nSkipped: ${skippedCount} (Missing Name/Phone)`;
+                }
+                alert(msg);
+
+                if (onRefresh && successCount > 0) {
+                    onRefresh();
+                }
+                if (fileInputRef.current) fileInputRef.current.value = '';
+
+            } catch (error) {
+                console.error('Import processing error:', error);
+                alert('Failed to process file. Please ensure it is a valid CSV or Excel file.');
             }
-            if (fileInputRef.current) fileInputRef.current.value = ''; // Reset
         };
-        reader.readAsText(file);
+        reader.readAsArrayBuffer(file);
     };
 
     return (
@@ -208,7 +231,7 @@ export const LeadsView: React.FC<LeadsViewProps> = ({ leads, onUpdateLead, onOpe
                             type="file"
                             ref={fileInputRef}
                             onChange={handleFileChange}
-                            accept=".csv"
+                            accept=".csv, .xlsx, .xls"
                             className="hidden"
                         />
                         <button
